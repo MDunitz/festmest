@@ -198,7 +198,7 @@ struct FestivalChannelsView: View {
     
     private func updateNearestStage() {
         // Get current location and find nearest stage
-        guard let location = locationManager.availableChannels.first,
+        guard !locationManager.availableChannels.isEmpty,
               let stages = scheduleManager.festivalData?.stages else {
             nearestStage = nil
             return
