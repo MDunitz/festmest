@@ -78,7 +78,7 @@ struct FestivalMainViewWithMap: View {
             Image(systemName: "tent.fill")
                 .foregroundColor(textColor)
             
-            Text(FestivalScheduleManager.shared.festivalData?.festival.name ?? "Festival Mode")
+            Text(FestivalScheduleManager.shared.festivalData?.festival.name ?? "Trip Mode")
                 .font(.system(.subheadline, design: .monospaced))
                 .fontWeight(.bold)
                 .foregroundColor(textColor)
@@ -163,7 +163,7 @@ struct FestivalInfoViewWithLocation: View {
                             .font(.system(.subheadline, design: .monospaced))
                             .foregroundColor(.secondary)
                         
-                        Text("Gates: \(festival.gatesOpen) • Music: \(festival.musicStart) - \(festival.musicEnd)")
+                        Text("\(scheduleManager.formatDayForDisplay(festival.dates.start)) - \(scheduleManager.formatDayForDisplay(festival.dates.end))")
                             .font(.system(.caption, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
@@ -191,7 +191,7 @@ struct FestivalInfoViewWithLocation: View {
                 
                 // Tips section
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Festival Tips")
+                    Text("Trip Tips")
                         .font(.system(.headline, design: .monospaced))
                         .foregroundColor(textColor)
                     
@@ -199,7 +199,6 @@ struct FestivalInfoViewWithLocation: View {
                     tipRow(icon: "person.2", text: "Add friends as favorites to find them later")
                     tipRow(icon: "location.fill", text: "Share location with mutual favorites only")
                     tipRow(icon: "battery.100", text: "BLE mesh is battery efficient")
-                    tipRow(icon: "hand.raised.fill", text: "Triple-tap screen to wipe all data")
                 }
                 
                 Divider()
@@ -208,7 +207,7 @@ struct FestivalInfoViewWithLocation: View {
                 Button(action: { festivalManager.disable() }) {
                     HStack {
                         Image(systemName: "xmark.circle")
-                        Text("Exit Festival Mode")
+                        Text("Exit Trip Mode")
                     }
                     .font(.system(.body, design: .monospaced))
                     .foregroundColor(.red)
