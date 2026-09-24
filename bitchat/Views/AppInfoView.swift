@@ -21,8 +21,24 @@ struct AppInfoView: View {
     @State private var showSelfieCamera: Bool = false
     @State private var pickedSelfie: UIImage?
     #endif
-    @AppStorage("ge136c.colorScheme") private var colorSchemePreference: String = "system"
-    
+    @AppStorage(AppStorageKeys.colorScheme) private var colorSchemePreference: String = "system"
+    @AppStorage(SelfieShareScope.storageKey) private var selfieShareScopeRaw: String = SelfieShareScope.defaultScope.rawValue
+    @ObservedObject private var carStore = CarAssignmentStore.shared
+    @State private var nicknameEdit: String = ""
+    @State private var isEditingNickname: Bool = false
+    @State private var settingsProfileExpanded = false
+    @State private var settingsAppearanceExpanded = false
+    @State private var settingsLocationExpanded = false
+    @State private var settingsDataExpanded = false
+
+    private static let tripDrivers = ["Nick", "Amanda", "Sarah", "Eran", "Abby", "Jarek", "Sophia", "Korbi"]
+
+    private func saveNickname() {
+        let trimmed = nicknameEdit.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { viewModel.confirmNickname(trimmed) }
+        isEditingNickname = false
+    }
+
     private var backgroundColor: Color {
         colorScheme == .dark ? Color.black : Color.white
     }
@@ -151,10 +167,42 @@ struct AppInfoView: View {
         #endif
     }
     
+    /// Who receives the user's selfie (see `SelfieShareScope` for why the
+    /// options switch transports rather than filtering one broadcast).
+    private var selfieSharingSetting: some View {
+        let scope = SelfieShareScope(rawValue: selfieShareScopeRaw) ?? SelfieShareScope.defaultScope
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Image(systemName: "person.2.circle")
+                    .font(.system(size: 18))
+                    .foregroundColor(textColor)
+                    .frame(width: 30)
+                Text("Share selfie with")
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundColor(textColor)
+                Spacer()
+                Picker("Share selfie with", selection: $selfieShareScopeRaw) {
+                    ForEach(SelfieShareScope.allCases) { option in
+                        Text(option.title).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+            Text(scope.explanation + " Selfies already shared stay on the devices that received them.")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(secondaryTextColor)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: selfieShareScopeRaw) { _ in
+            // Push the selfie out under the new scope (no-op for `.off`).
+            SelfieSyncService.shared.publishOwnSelfie()
+        }
+    }
+
     @ViewBuilder
     private var infoContent: some View {
         VStack(alignment: .leading, spacing: 24) {
-            // Header — Meshy/GE136C rebrand. Tagline calls out that this page
+            // Header — Meshy brand + current trip (from the active trip JSON). Tagline calls out that this page
             // doubles as the how-to guide AND the settings hub.
             VStack(alignment: .center, spacing: 10) {
                 Image("MeshyLogo")
@@ -167,7 +215,7 @@ struct AppInfoView: View {
                     .font(.bitchatSystem(size: 32, weight: .bold, design: .monospaced))
                     .foregroundColor(textColor)
 
-                Text("GE136C Spring — Sierras 2026")
+                Text(TripData.bundled.map { "\($0.trip.name) · \($0.trip.dateRangeText)" } ?? "Offline trip companion")
                     .font(.bitchatSystem(size: 13, design: .monospaced))
                     .foregroundColor(secondaryTextColor)
 
@@ -204,7 +252,14 @@ struct AppInfoView: View {
                     ("calendar", "Routes — toggle which day routes appear on the map"),
                     ("scope", "Fit — zoom out to fit every stop + friend"),
                     ("note.text.badge.plus", "Notes — drop a draggable yellow pin, then add a note"),
-                    ("arrow.down.circle", "Offline — download topo tiles + driving routes for no-service areas")
+                    ("arrow.down.circle", "Offline — opens the download sheet for topo tiles + driving routes")
+                ])
+                howSection("Downloading offline maps (do on Wi-Fi before departure)", items: [
+                    ("arrow.down.circle", "Tap Offline button on the map to open the download sheet"),
+                    ("map", "Pick a source: OpenTopoMap shows elevation contours, OpenStreetMap shows roads"),
+                    ("chart.bar", "Pick a detail level: Low (~20 MB) fits roads + valleys; Mid (~77 MB) adds towns; Best (~300 MB) shows hiking trails"),
+                    ("arrow.down.to.line", "Tap Download — tiles are cached on-device and load automatically when you're off-grid"),
+                    ("checkmark.circle", "A tile count badge on the Offline button confirms the download is ready")
                 ])
                 howSection("Top-right menu", items: [
                     ("line.3.horizontal", "Switch tabs, share invite, open this How to use & Settings page")
@@ -291,116 +346,291 @@ struct AppInfoView: View {
     /// are near the top.
     @ViewBuilder
     private var settingsSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             SectionHeader("SETTINGS")
+                .padding(.bottom, 4)
 
             #if os(iOS)
-            // Selfie management
-            HStack(alignment: .center, spacing: 12) {
-                Group {
-                    if let img = selfieStore.image {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 44, height: 44)
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(TripTheme.accent, lineWidth: 1.5))
-                    } else {
-                        Image(systemName: "person.crop.circle.fill.badge.plus")
-                            .font(.system(size: 32))
-                            .foregroundColor(TripTheme.accent)
-                            .frame(width: 44, height: 44)
-                    }
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Profile picture")
-                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+            // Profile section
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { settingsProfileExpanded.toggle() } }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "person.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(TripTheme.accent)
+                        .frame(width: 22)
+                    Text("Profile")
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundColor(textColor)
-                    Text(selfieStore.image == nil ? "Add a selfie for the map" : "Tap to retake")
-                        .font(.system(size: 11, design: .monospaced))
+                    Spacer()
+                    Image(systemName: settingsProfileExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11))
                         .foregroundColor(secondaryTextColor)
                 }
-                Spacer()
-                if selfieStore.image != nil {
-                    Button(role: .destructive) { selfieStore.delete() } label: {
-                        Image(systemName: "trash")
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if settingsProfileExpanded {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Group {
+                            if let img = selfieStore.image {
+                                Image(uiImage: img)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 44, height: 44)
+                                    .clipShape(Circle())
+                                    .overlay(Circle().stroke(TripTheme.accent, lineWidth: 1.5))
+                            } else {
+                                Image(systemName: "person.crop.circle.fill.badge.plus")
+                                    .font(.system(size: 32))
+                                    .foregroundColor(TripTheme.accent)
+                                    .frame(width: 44, height: 44)
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Profile picture")
+                                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                                .foregroundColor(textColor)
+                            Text(selfieStore.image == nil ? "Add a selfie for the map" : "Tap to retake")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(secondaryTextColor)
+                        }
+                        Spacer()
+                        if selfieStore.image != nil {
+                            Button(role: .destructive) { selfieStore.delete() } label: {
+                                Image(systemName: "trash")
+                            }
+                        }
+                        Button { showSelfieCamera = true } label: {
+                            Image(systemName: "camera")
+                                .foregroundColor(textColor)
+                        }
+                    }
+                    .padding(.vertical, 4)
+
+                    selfieSharingSetting
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Image(systemName: "at")
+                            .font(.system(size: 18))
+                            .foregroundColor(textColor)
+                            .frame(width: 30)
+                        if isEditingNickname {
+                            TextField("Username", text: $nicknameEdit)
+                                .font(.system(size: 14, design: .monospaced))
+                                .textFieldStyle(.roundedBorder)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .submitLabel(.done)
+                                .onSubmit { saveNickname() }
+                            Button(action: saveNickname) {
+                                Text("Save")
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(TripTheme.accent)
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Username")
+                                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(textColor)
+                                Text("@\(viewModel.nickname)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(secondaryTextColor)
+                            }
+                            Spacer()
+                            Button(action: {
+                                nicknameEdit = viewModel.nickname
+                                isEditingNickname = true
+                            }) {
+                                Image(systemName: "pencil")
+                                    .foregroundColor(textColor)
+                                    .padding(4)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+
+                    Menu {
+                        Button(action: { carStore.driver = nil }) {
+                            Label("No car", systemImage: carStore.driver == nil ? "checkmark" : "xmark.circle")
+                        }
+                        Divider()
+                        ForEach(Self.tripDrivers, id: \.self) { name in
+                            Button(action: { carStore.driver = name }) {
+                                if let current = carStore.driver, current.lowercased() == name.lowercased() {
+                                    Label(name, systemImage: "checkmark")
+                                } else {
+                                    Text(name)
+                                }
+                            }
+                        }
+                    } label: {
+                        settingsRow(
+                            icon: "car.fill",
+                            title: "Car group",
+                            subtitle: carStore.driver.map { "\($0)'s car" } ?? "Not assigned — tap to pick"
+                        )
                     }
                 }
-                Button { showSelfieCamera = true } label: {
-                    Image(systemName: "camera")
-                        .foregroundColor(textColor)
-                }
+                .padding(.bottom, 8)
             }
-            .padding(.vertical, 4)
+
+            Divider()
             #endif
 
-            // Appearance (light/dark/system)
-            Menu {
-                Button { colorSchemePreference = "system" } label: {
-                    Label("System default", systemImage: colorSchemePreference == "system" ? "checkmark" : "iphone")
+            // Appearance section
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { settingsAppearanceExpanded.toggle() } }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "circle.lefthalf.filled")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(TripTheme.accent)
+                        .frame(width: 22)
+                    Text("Appearance")
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundColor(textColor)
+                    Spacer()
+                    Image(systemName: settingsAppearanceExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11))
+                        .foregroundColor(secondaryTextColor)
                 }
-                Button { colorSchemePreference = "light" } label: {
-                    Label("Light", systemImage: colorSchemePreference == "light" ? "checkmark" : "sun.max")
-                }
-                Button { colorSchemePreference = "dark" } label: {
-                    Label("Dark", systemImage: colorSchemePreference == "dark" ? "checkmark" : "moon")
-                }
-            } label: {
-                settingsRow(icon: "circle.lefthalf.filled",
-                             title: "Appearance",
-                             subtitle: appearanceSubtitle)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+
+            if settingsAppearanceExpanded {
+                VStack(alignment: .leading, spacing: 14) {
+                    Menu {
+                        Button { colorSchemePreference = "system" } label: {
+                            Label("System default", systemImage: colorSchemePreference == "system" ? "checkmark" : "iphone")
+                        }
+                        Button { colorSchemePreference = "light" } label: {
+                            Label("Light", systemImage: colorSchemePreference == "light" ? "checkmark" : "sun.max")
+                        }
+                        Button { colorSchemePreference = "dark" } label: {
+                            Label("Dark", systemImage: colorSchemePreference == "dark" ? "checkmark" : "moon")
+                        }
+                    } label: {
+                        settingsRow(icon: "circle.lefthalf.filled",
+                                     title: "Appearance",
+                                     subtitle: appearanceSubtitle)
+                    }
+
+                    #if os(iOS)
+                    Button(action: { showTextColorPicker = true }) {
+                        settingsRow(icon: "paintpalette",
+                                     title: "Text color",
+                                     subtitle: "Pick the color your messages display in")
+                    }
+                    .buttonStyle(.plain)
+                    #endif
+                }
+                .padding(.bottom, 8)
+            }
+
+            Divider()
 
             #if os(iOS)
-            Button(action: { showTextColorPicker = true }) {
-                settingsRow(icon: "paintpalette",
-                             title: "Text color",
-                             subtitle: "Pick the color your messages display in")
+            // Location section
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { settingsLocationExpanded.toggle() } }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "location.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(TripTheme.accent)
+                        .frame(width: 22)
+                    Text("Location")
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundColor(textColor)
+                    Spacer()
+                    Image(systemName: settingsLocationExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11))
+                        .foregroundColor(secondaryTextColor)
+                }
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            // Location sharing toggle
-            Toggle(isOn: Binding(
-                get: { locationService.isSharing },
-                set: { newValue in
-                    if newValue { locationService.startSharing() }
-                    else { locationService.stopSharing() }
-                }
-            )) {
-                HStack(spacing: 12) {
-                    Image(systemName: locationService.isSharing ? "location.fill" : "location.slash")
-                        .font(.system(size: 18))
-                        .foregroundColor(textColor)
-                        .frame(width: 30)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Share my location")
-                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                            .foregroundColor(textColor)
-                        Text("Broadcasts your position to trip peers every ~30s")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(secondaryTextColor)
+            if settingsLocationExpanded {
+                VStack(alignment: .leading, spacing: 14) {
+                    Toggle(isOn: Binding(
+                        get: { locationService.isSharing },
+                        set: { newValue in
+                            if newValue { locationService.startSharing() }
+                            else { locationService.stopSharing() }
+                        }
+                    )) {
+                        HStack(spacing: 12) {
+                            Image(systemName: locationService.isSharing ? "location.fill" : "location.slash")
+                                .font(.system(size: 18))
+                                .foregroundColor(textColor)
+                                .frame(width: 30)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Share my location")
+                                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(textColor)
+                                Text("Broadcasts your position to trip peers every ~30s")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(secondaryTextColor)
+                            }
+                        }
                     }
+                    .tint(textColor)
                 }
+                .padding(.bottom, 8)
             }
-            .tint(textColor)
+
+            Divider()
             #endif
 
-            // Clear chat
-            Button(action: { showClearChatConfirm = true }) {
-                settingsRow(icon: "trash",
-                             title: "Clear chat history",
-                             subtitle: "Removes locally cached messages. Peers keep theirs.")
+            // Data section
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { settingsDataExpanded.toggle() } }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "externaldrive")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(TripTheme.accent)
+                        .frame(width: 22)
+                    Text("Data")
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundColor(textColor)
+                    Spacer()
+                    Image(systemName: settingsDataExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11))
+                        .foregroundColor(secondaryTextColor)
+                }
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            // Favorites list
-            NavigationLink {
-                FavoritesListView()
-            } label: {
-                settingsRow(icon: "star.fill",
-                             title: "Favorites",
-                             subtitle: "\(FavoritesPersistenceService.shared.favorites.count) saved",
-                             chevron: true)
+            if settingsDataExpanded {
+                VStack(alignment: .leading, spacing: 14) {
+                    Button(action: { showClearChatConfirm = true }) {
+                        settingsRow(icon: "trash",
+                                     title: "Clear chat history",
+                                     subtitle: "Removes locally cached messages. Peers keep theirs.")
+                    }
+                    .buttonStyle(.plain)
+
+                    NavigationLink {
+                        FavoritesListView()
+                    } label: {
+                        settingsRow(icon: "star.fill",
+                                     title: "Favorites",
+                                     subtitle: "\(FavoritesPersistenceService.shared.favorites.count) saved",
+                                     chevron: true)
+                    }
+                }
+                .padding(.bottom, 8)
             }
         }
     }

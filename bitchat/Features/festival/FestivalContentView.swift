@@ -9,8 +9,8 @@ import UIKit
 @MainActor
 final class UserSelfieStore: ObservableObject {
     static let shared = UserSelfieStore()
-    private let promptedKey = "ge136c.hasPromptedSelfie"
-    private let filename = "ge136c-selfie.jpg"
+    private let promptedKey = AppStorageKeys.hasPromptedSelfie
+    private let filename = AppStorageKeys.selfieFile
 
     @Published var image: UIImage?
     @Published var hasPrompted: Bool {
@@ -65,11 +65,11 @@ final class UserSelfieStore: ObservableObject {
 }
 
 /// Per-user customization for the color the user's own messages render in.
-/// Persists a hex string in UserDefaults; defaults to GE136C orange.
+/// Persists a hex string in UserDefaults; defaults to the Meshy orange accent.
 @MainActor
 final class UserChatColorStore: ObservableObject {
     static let shared = UserChatColorStore()
-    private let key = "ge136c.userTextColor"
+    private let key = AppStorageKeys.userTextColor
     static let defaultHex = "#FF7E15"
 
     @Published var hex: String {
@@ -187,7 +187,10 @@ enum InviteLink {
     static let url = URL(string: "https://yicolas.github.io/festy/")!
 
     static var shareText: String {
-        "join me on GE136C — offline trip chat for the Sierras. install instructions: \(url.absoluteString)"
+        guard let trip = TripData.bundled?.trip else {
+            return "join me on Meshy — offline trip chat. install instructions: \(url.absoluteString)"
+        }
+        return "join me on \(trip.displayShortName) — offline trip chat for \(trip.location). install instructions: \(url.absoluteString)"
     }
 }
 
@@ -207,7 +210,7 @@ struct ShareSheet: UIViewControllerRepresentable {
 struct TripContentView: View {
     @EnvironmentObject var viewModel: ChatViewModel
     @ObservedObject private var selfieStore = UserSelfieStore.shared
-    @AppStorage("ge136c.colorScheme") private var colorSchemePreference: String = "system"
+    @AppStorage(AppStorageKeys.colorScheme) private var colorSchemePreference: String = "system"
 
     private var preferredColorScheme: ColorScheme? {
         switch colorSchemePreference {
@@ -457,11 +460,21 @@ struct TripMainView: View {
     @State private var isShowingColorPicker = false
     @State private var isShowingSelfieMenu = false
     @State private var isShowingSettings = false
+    @State private var showPeerList = false
     #if os(iOS)
     @State private var isShowingSelfieCamera = false
     @State private var pickedSelfieImage: UIImage?
+    @State private var isEditingUsername = false
+    @State private var nicknameEditText = ""
     #endif
-    @AppStorage("ge136c.colorScheme") private var colorSchemePreference: String = "system"
+    @AppStorage(AppStorageKeys.colorScheme) private var colorSchemePreference: String = "system"
+
+    private var peerCount: Int {
+        viewModel.allPeers.reduce(0) { count, peer in
+            guard peer.peerID != viewModel.meshService.myPeerID else { return count }
+            return (peer.isConnected || peer.isReachable) ? count + 1 : count
+        }
+    }
 
     private var tabs: [TripTab] {
         scheduleManager.tabs
@@ -556,11 +569,25 @@ struct TripMainView: View {
                 .foregroundColor(TripTheme.accent)
 
             Text(scheduleManager.tripData?.trip.name ?? "Trip Mode")
-                .font(.system(.subheadline, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .fontWeight(.bold)
                 .foregroundColor(TripTheme.primaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
 
             Spacer()
+
+            Button(action: { showPeerList = true }) {
+                HStack(spacing: 3) {
+                    Image(systemName: "person.2")
+                        .font(.system(size: 13))
+                    Text("\(peerCount)")
+                        .font(.system(.caption, design: .monospaced))
+                }
+                .foregroundColor(peerCount > 0 ? TripTheme.accent : .secondary)
+                .padding(.trailing, 6)
+            }
+            .buttonStyle(.plain)
 
             Menu {
                 ForEach(tabs) { tab in
@@ -597,6 +624,13 @@ struct TripMainView: View {
             AppInfoView()
                 .environmentObject(viewModel)
         }
+        .sheet(isPresented: $showPeerList) {
+            OnlinePeersSheet(onDMStarted: { _ in
+                showPeerList = false
+                selectedTabId = "chat"
+            })
+            .environmentObject(viewModel)
+        }
         #if os(iOS)
         .sheet(isPresented: $isShowingShareSheet) {
             ShareSheet(activityItems: [InviteLink.shareText])
@@ -613,12 +647,24 @@ struct TripMainView: View {
             CameraPicker(image: $pickedSelfieImage)
                 .ignoresSafeArea()
         }
-        .confirmationDialog("Your selfie",
+        .confirmationDialog("Your profile",
                             isPresented: $isShowingSelfieMenu,
                             titleVisibility: .visible) {
-            Button("Retake") { isShowingSelfieCamera = true }
+            Button(selfieStore.image == nil ? "Add selfie" : "Retake selfie") { isShowingSelfieCamera = true }
             if selfieStore.image != nil {
-                Button("Delete", role: .destructive) { selfieStore.delete() }
+                Button("Delete selfie", role: .destructive) { selfieStore.delete() }
+            }
+            Button("Change username") {
+                nicknameEditText = viewModel.nickname
+                isEditingUsername = true
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Change username", isPresented: $isEditingUsername) {
+            TextField("Username", text: $nicknameEditText)
+            Button("Save") {
+                let trimmed = nicknameEditText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { viewModel.confirmNickname(trimmed) }
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -629,11 +675,7 @@ struct TripMainView: View {
     private var selfieThumb: some View {
         #if os(iOS)
         Button {
-            if selfieStore.image == nil {
-                isShowingSelfieCamera = true
-            } else {
-                isShowingSelfieMenu = true
-            }
+            isShowingSelfieMenu = true
         } label: {
             Group {
                 if let img = selfieStore.image {
@@ -694,6 +736,7 @@ struct TripChatHost: View {
     @ObservedObject private var locationManager = LocationChannelManager.shared
     @State private var showChannelPicker = false
     @State private var showClearConfirm = false
+    @State private var showPeerList = false
 
     private var peerCount: Int {
         viewModel.allPeers.reduce(0) { count, peer in
@@ -720,6 +763,10 @@ struct TripChatHost: View {
                 .onAppear { viewModel.isLocationChannelsSheetPresented = true }
                 .onDisappear { viewModel.isLocationChannelsSheetPresented = false }
         }
+        .sheet(isPresented: $showPeerList) {
+            OnlinePeersSheet()
+                .environmentObject(viewModel)
+        }
         .confirmationDialog("Clear this chat log?", isPresented: $showClearConfirm, titleVisibility: .visible) {
             Button("Clear chat log", role: .destructive) {
                 viewModel.clearCurrentPublicTimeline()
@@ -741,13 +788,16 @@ struct TripChatHost: View {
 
             Spacer()
 
-            HStack(spacing: 4) {
-                Image(systemName: "person.2")
-                    .font(.system(size: 12))
-                Text("\(peerCount)")
-                    .font(.system(.caption, design: .monospaced))
+            Button(action: { showPeerList = true }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "person.2")
+                        .font(.system(size: 12))
+                    Text("\(peerCount)")
+                        .font(.system(.caption, design: .monospaced))
+                }
+                .foregroundColor(peerCount > 0 ? TripTheme.uiTint : .secondary)
             }
-            .foregroundColor(peerCount > 0 ? TripTheme.uiTint : .secondary)
+            .buttonStyle(.plain)
 
             Button(action: { showClearConfirm = true }) {
                 Image(systemName: "trash")
@@ -997,57 +1047,17 @@ struct TripInfoView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                raftingWaiverCard
+                ForEach(infoLinks.filter(\.isMandatory)) { link in
+                    mandatoryFormCard(link)
+                }
+                if let safety = scheduleManager.tripData?.safety {
+                    safetyCard(safety)
+                }
+                ForEach(infoLinks.filter { !$0.isMandatory }) { link in
+                    linkCard(link)
+                }
                 howToCard
-                photoUploadCard
                 feedbackCard
-
-                if let trip = scheduleManager.tripData?.trip {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(trip.name)
-                            .font(.system(.title2, design: .monospaced))
-                            .fontWeight(.bold)
-                            .foregroundColor(TripTheme.onSurfaceText)
-
-                        Text(trip.subtitle ?? "Offline-first field trip coordination")
-                            .font(.system(.subheadline, design: .monospaced))
-                            .foregroundColor(TripTheme.secondaryText)
-
-                        Text("\(scheduleManager.formatDayForDisplay(trip.dates.start)) - \(scheduleManager.formatDayForDisplay(trip.dates.end))")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(TripTheme.secondaryText)
-                    }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(TripTheme.cardHeaderBackground)
-                    .cornerRadius(12)
-                }
-
-                ForEach(scheduleManager.infoSections) { section in
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(section.title)
-                            .font(.system(.headline, design: .monospaced))
-                            .foregroundColor(TripTheme.onSurfaceText)
-
-                        ForEach(section.bullets, id: \.self) { bullet in
-                            HStack(alignment: .top, spacing: 8) {
-                                Text("•")
-                                    .foregroundColor(TripTheme.accent)
-                                Text(bullet)
-                                    .font(.system(.subheadline, design: .monospaced))
-                                    .foregroundColor(TripTheme.onSurfaceText.opacity(0.85))
-                            }
-                        }
-                    }
-                    .padding()
-                    .background(TripTheme.surface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(TripTheme.stroke, lineWidth: 1)
-                    )
-                    .cornerRadius(10)
-                }
-
             }
             .padding()
         }
@@ -1058,51 +1068,162 @@ struct TripInfoView: View {
         }
     }
 
-    /// One-tap entry into the unified "How to use & Settings" page. The
-    /// detailed walkthrough lives there now instead of being duplicated as an
-    /// inline expandable card.
-    private var raftingWaiverCard: some View {
-        let url = URL(string: "https://waiver.smartwaiver.com/w/5a5fdb9184660/web/?auto_tag=fh_id_345932112")!
-        return Link(destination: url) {
+    private var infoLinks: [TripInfoLink] {
+        scheduleManager.tripData?.infoLinks ?? []
+    }
+
+    private func mandatoryFormCard(_ link: TripInfoLink) -> some View {
+        Link(destination: link.url) {
             HStack(spacing: 12) {
-                Image(systemName: "pencil.and.list.clipboard")
+                Image(systemName: link.icon ?? "doc.text.fill")
                     .font(.system(size: 28))
                     .foregroundColor(.white)
                     .frame(width: 52, height: 52)
                     .background(Color.red)
                     .cornerRadius(12)
-
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text("⚠︎ MANDATORY")
-                            .font(.system(.caption2, design: .monospaced))
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.red)
-                            .cornerRadius(4)
-                    }
-                    Text("Rafting Waiver")
+                    Text("⚠︎ MANDATORY")
+                        .font(.system(.caption2, design: .monospaced))
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.red)
+                        .cornerRadius(4)
+                    Text(link.title)
                         .font(.system(.headline, design: .monospaced))
                         .foregroundColor(TripTheme.onSurfaceText)
-                    Text("Sign before the trip — tap to open form")
+                    Text(link.subtitle ?? "")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(TripTheme.secondaryText)
                 }
-
                 Spacer()
-
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.red)
             }
             .padding(14)
             .background(TripTheme.surface)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.red.opacity(0.5), lineWidth: 1.5)
-            )
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.red.opacity(0.5), lineWidth: 1.5))
+            .cornerRadius(12)
+        }
+    }
+
+    private func safetyCard(_ safety: TripSafety) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "cross.case.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(.white)
+                    .frame(width: 40, height: 40)
+                    .background(Color.orange)
+                    .cornerRadius(10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Safety & Logistics")
+                        .font(.system(.headline, design: .monospaced))
+                        .foregroundColor(TripTheme.onSurfaceText)
+                    if let trip = scheduleManager.tripData?.trip {
+                        Text("\(trip.displayShortName) · \(trip.dateRangeText)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(TripTheme.secondaryText)
+                    }
+                }
+            }
+
+            ForEach(Array(safety.sections.enumerated()), id: \.offset) { _, section in
+                Divider().background(TripTheme.stroke)
+                safetySection(section)
+            }
+        }
+        .padding(14)
+        .background(TripTheme.surface)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.4), lineWidth: 1.5))
+        .cornerRadius(12)
+    }
+
+    @ViewBuilder
+    private func safetySection(_ section: TripSafetySection) -> some View {
+        if let title = section.title {
+            Text(title.uppercased())
+                .font(.system(.caption2, design: .monospaced))
+                .fontWeight(.bold)
+                .foregroundColor(TripTheme.accent)
+        }
+        ForEach(Array((section.rows ?? []).enumerated()), id: \.offset) { _, row in
+            safetyRow(icon: row.icon ?? "info.circle", label: row.label, value: row.value)
+        }
+        ForEach(Array((section.bullets ?? []).enumerated()), id: \.offset) { _, bullet in
+            safetyBullet(bullet)
+        }
+        if let text = section.text {
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(TripTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private func safetyRow(icon: String, label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundColor(TripTheme.accent)
+                .frame(width: 16)
+            Text(label + ":")
+                .font(.system(.caption, design: .monospaced))
+                .fontWeight(.semibold)
+                .foregroundColor(TripTheme.onSurfaceText)
+                .frame(width: 95, alignment: .leading)
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(TripTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private func safetyBullet(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("⚠")
+                .font(.system(.caption2))
+                .foregroundColor(.orange)
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(TripTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func linkCard(_ link: TripInfoLink) -> some View {
+        let color = link.color
+        return Link(destination: link.url) {
+            HStack(spacing: 12) {
+                Image(systemName: link.icon ?? "link")
+                    .font(.system(size: 28))
+                    .foregroundColor(.white)
+                    .frame(width: 52, height: 52)
+                    .background(color)
+                    .cornerRadius(12)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(link.title)
+                        .font(.system(.headline, design: .monospaced))
+                        .foregroundColor(TripTheme.onSurfaceText)
+                    if let subtitle = link.subtitle {
+                        Text(subtitle)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(TripTheme.secondaryText)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer()
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(color)
+            }
+            .padding(14)
+            .background(TripTheme.surface)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.4), lineWidth: 1.5))
             .cornerRadius(12)
         }
     }
@@ -1139,11 +1260,13 @@ struct TripInfoView: View {
     }
 
     private var feedbackCard: some View {
-        let subject = "GE136C App Feedback"
-        let body = "What worked, what didn't, what would you change?\n\n— Sent from GE136C on iOS"
+        let tripName = scheduleManager.tripData?.trip.displayShortName ?? "Meshy"
+        let email = scheduleManager.tripData?.trip.feedbackEmail ?? TripInfo.defaultFeedbackEmail
+        let subject = "\(tripName) App Feedback"
+        let body = "What worked, what didn't, what would you change?\n\n— Sent from Meshy on iOS (\(tripName))"
         let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? subject
         let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? body
-        let mailto = URL(string: "mailto:yick@duck.com?subject=\(encodedSubject)&body=\(encodedBody)")!
+        let mailto = URL(string: "mailto:\(email)?subject=\(encodedSubject)&body=\(encodedBody)")!
         return Link(destination: mailto) {
             HStack(spacing: 12) {
                 Image(systemName: "envelope.badge.fill")
@@ -1157,44 +1280,7 @@ struct TripInfoView: View {
                     Text("Send feedback or suggestions")
                         .font(.system(.headline, design: .monospaced))
                         .foregroundColor(TripTheme.onSurfaceText)
-                    Text("Bugs, ideas, requests → yick@duck.com")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(TripTheme.secondaryText)
-                        .lineLimit(2)
-                }
-
-                Spacer()
-
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(TripTheme.accent)
-            }
-            .padding(14)
-            .background(TripTheme.surface)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(TripTheme.accent.opacity(0.4), lineWidth: 1.5)
-            )
-            .cornerRadius(12)
-        }
-    }
-
-    private var photoUploadCard: some View {
-        let url = URL(string: "https://caltech.box.com/s/zxnmiov9e71oer4znp3k0f912hq7qfdi")!
-        return Link(destination: url) {
-            HStack(spacing: 12) {
-                Image(systemName: "photo.stack.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.white)
-                    .frame(width: 52, height: 52)
-                    .background(TripTheme.accent)
-                    .cornerRadius(12)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Upload trip photos")
-                        .font(.system(.headline, design: .monospaced))
-                        .foregroundColor(TripTheme.onSurfaceText)
-                    Text("Drop your shots into the shared Caltech Box folder.")
+                    Text("Bugs, ideas, requests → \(email)")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(TripTheme.secondaryText)
                         .lineLimit(2)
@@ -1217,6 +1303,139 @@ struct TripInfoView: View {
     }
 }
 
+// MARK: - Online Peers Sheet
+
+struct OnlinePeersSheet: View {
+    var onDMStarted: ((PeerID) -> Void)? = nil
+    @EnvironmentObject private var viewModel: ChatViewModel
+    @ObservedObject private var selfieStore = PeerSelfieStore.shared
+    @Environment(\.dismiss) private var dismiss
+
+    private var onlinePeers: [BitchatPeer] {
+        viewModel.allPeers.filter { peer in
+            peer.peerID != viewModel.meshService.myPeerID &&
+            (peer.isConnected || peer.isReachable)
+        }.sorted { $0.displayName.lowercased() < $1.displayName.lowercased() }
+    }
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if onlinePeers.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "person.2.slash")
+                            .font(.system(size: 48))
+                            .foregroundColor(TripTheme.secondaryText)
+                        Text("No peers visible")
+                            .font(.system(.title3, design: .monospaced, weight: .semibold))
+                            .foregroundColor(TripTheme.primaryText)
+                        Text("Others appear here when they're nearby with Bluetooth on.")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(TripTheme.secondaryText)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(TripTheme.background)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(onlinePeers, id: \.peerID) { peer in
+                                peerRow(peer)
+                                Divider()
+                                    .background(TripTheme.stroke)
+                                    .padding(.leading, 78)
+                            }
+                        }
+                    }
+                    .background(TripTheme.background)
+                }
+            }
+            .navigationTitle("\(onlinePeers.count) Online")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(TripTheme.uiTint)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func peerRow(_ peer: BitchatPeer) -> some View {
+        HStack(spacing: 14) {
+            selfieAvatar(for: peer)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(peer.displayName)
+                    .font(.system(.body, design: .monospaced, weight: .semibold))
+                    .foregroundColor(TripTheme.primaryText)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(peer.isConnected ? TripTheme.accent : TripTheme.accent.opacity(0.5))
+                        .frame(width: 6, height: 6)
+                    Text(peer.isConnected ? "Direct BLE" : "Mesh reachable")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(TripTheme.secondaryText)
+                }
+            }
+            Spacer()
+            Button(action: {
+                viewModel.startPrivateChat(with: peer.peerID)
+                onDMStarted?(peer.peerID)
+                dismiss()
+            }) {
+                Label("Message", systemImage: "bubble.left.fill")
+                    .font(.system(.caption, design: .monospaced, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(TripTheme.accent)
+                    .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    @ViewBuilder
+    private func selfieAvatar(for peer: BitchatPeer) -> some View {
+        let ring: Color = peer.isConnected ? TripTheme.accent : TripTheme.accent.opacity(0.5)
+        #if os(iOS)
+        if let img = selfieStore.cachedImage(forNoiseKey: peer.noisePublicKey) {
+            Image(uiImage: img)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 50, height: 50)
+                .clipShape(Circle())
+                .overlay(Circle().stroke(ring, lineWidth: 2))
+        } else {
+            initialsCircle(for: peer, ring: ring)
+        }
+        #else
+        initialsCircle(for: peer, ring: ring)
+        #endif
+    }
+
+    @ViewBuilder
+    private func initialsCircle(for peer: BitchatPeer, ring: Color) -> some View {
+        ZStack {
+            Circle()
+                .fill(TripTheme.accentSoft)
+                .frame(width: 50, height: 50)
+            Text(String(peer.displayName.prefix(1)).uppercased())
+                .font(.system(.title2, design: .monospaced, weight: .bold))
+                .foregroundColor(TripTheme.accent)
+        }
+        .overlay(Circle().stroke(ring, lineWidth: 2))
+    }
+}
+
 #if os(iOS)
 struct OfflineMapsCard: View {
     @ObservedObject private var cache = TileCacheManager.shared
@@ -1235,7 +1454,7 @@ struct OfflineMapsCard: View {
                 .font(.system(.headline, design: .monospaced))
                 .foregroundColor(TripTheme.primaryText)
 
-            Text("Cell service drops in the Sierras. Download map tiles for the trip area now so the in-app map keeps working off-grid. Tiles are stored on this device and used the next time you open the trip map.")
+            Text("Cell service drops on the trip (\(TripData.bundled?.trip.location ?? "off-grid")). Download map tiles for the trip area now so the in-app map keeps working off-grid. Tiles are stored on this device and used the next time you open the trip map.")
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundColor(TripTheme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1290,7 +1509,7 @@ struct OfflineMapsCard: View {
                         }
                     }
                 }
-                Text("\(cache.preferredDetail.blurb.capitalized). Zooms \(cache.preferredDetail.zooms.lowerBound)–\(cache.preferredDetail.zooms.upperBound). ~\(formatMB(estimate.bytes)) download.")
+                Text("\(cache.preferredDetail.blurb.capitalized). Zooms z\(cache.preferredDetail.zooms.lowerBound)–z\(cache.preferredDetail.zooms.upperBound) · estimated ~\(formatMB(estimate.bytes))")
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundColor(TripTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
